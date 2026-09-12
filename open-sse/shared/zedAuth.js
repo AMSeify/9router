@@ -21,6 +21,7 @@ import {
   ZED_MODEL_CACHE_TTL_MS,
   ZED_PRIVATE_KEY_PREFIX,
   ZED_FREE_PLAN_IDS,
+  isNewerZedVersion,
   buildZedHostedModelsBlockedMessage,
   buildZedEmptyCatalogMessage,
 } from "../config/zedConstants.js";
@@ -39,6 +40,29 @@ const MODEL_CACHE_TTL_MS = ZED_MODEL_CACHE_TTL_MS;
 const llmTokenCache = new Map();
 const modelCache = new Map();
 const modelInflight = new Map();
+let negotiatedZedClientVersion = ZED_CLIENT_VERSION;
+
+export function getZedClientVersion() {
+  return negotiatedZedClientVersion;
+}
+
+export function noteZedMinimumRequiredVersion(required) {
+  const value = String(required || "").trim();
+  if (!value) return negotiatedZedClientVersion;
+  if (isNewerZedVersion(value, negotiatedZedClientVersion)) {
+    negotiatedZedClientVersion = value;
+  }
+  return negotiatedZedClientVersion;
+}
+
+function zedLlmDefaultHeaders() {
+  return {
+    [ZED_HEADERS.version]: getZedClientVersion(),
+    [ZED_HEADERS.clientSupportsStatus]: "true",
+    [ZED_HEADERS.clientSupportsStreamEnded]: "true",
+    [ZED_HEADERS.clientSupportsXai]: "true",
+  };
+}
 
 function b64url(value) {
   return Buffer.from(value).toString("base64url");
@@ -178,11 +202,26 @@ export function decryptZedAccessToken(encryptedAccessToken, privateKeyVerifier) 
 export function buildZedUserAuthHeader(credentials) {
   const psd = credentials?.providerSpecificData || {};
   const userId = psd.userId || credentials?.userId;
-  const accessToken = credentials?.accessToken || credentials?.apiKey;
+  const accessToken = normalizeZedAccessToken(credentials?.accessToken || credentials?.apiKey);
   if (!userId || !accessToken) {
     throw new Error("Zed credential is missing userId or accessToken");
   }
   return `${userId} ${accessToken}`;
+}
+
+/** Compact keyring v2 JSON so Authorization stays a single header value. */
+export function normalizeZedAccessToken(raw) {
+  const token = String(raw || "").trim();
+  if (!token.startsWith("{")) return token;
+  try {
+    const parsed = JSON.parse(token);
+    if (parsed?.version === 2 && typeof parsed.token === "string") {
+      return JSON.stringify(parsed);
+    }
+  } catch {
+    /* keep raw */
+  }
+  return token;
 }
 
 function getSystemId(credentials) {
@@ -299,6 +338,7 @@ export async function fetchZedLlmToken(credentials, options = {}) {
       body: JSON.stringify({ organization_id: organizationId }),
       signal: options.signal ?? undefined,
     },
+    options.proxyOptions ?? null,
   );
   const token =
     typeof data?.token === "string" ? data.token : data?.token?.[0] || data?.token?.value;
@@ -320,17 +360,27 @@ export async function zedLlmFetch(credentials, path, options = {}) {
   const url = zedUrl(config, "llmBaseUrl", path, ZED_LLM_BASE_URL);
   const buildRequest = async (forceRefresh) => {
     const token = await fetchZedLlmToken(credentials, { ...options, forceRefresh });
-    return proxyAwareFetch(url, {
-      ...options.fetchOptions,
-      headers: {
-        ...(options.fetchOptions?.headers || {}),
-        Authorization: `Bearer ${token}`,
+    return proxyAwareFetch(
+      url,
+      {
+        ...options.fetchOptions,
+        headers: {
+          ...zedLlmDefaultHeaders(),
+          ...(options.fetchOptions?.headers || {}),
+          Authorization: `Bearer ${token}`,
+        },
+        signal: options.signal ?? undefined,
       },
-      signal: options.signal ?? undefined,
-    });
+      options.proxyOptions ?? null,
+    );
   };
 
   let response = await buildRequest(false);
+  const requiredVersion = response?.headers?.get?.(ZED_HEADERS.minimumRequiredVersion);
+  if (requiredVersion && isNewerZedVersion(requiredVersion, getZedClientVersion())) {
+    noteZedMinimumRequiredVersion(requiredVersion);
+    response = await buildRequest(false);
+  }
   if (shouldRefreshZedLlmToken(response)) {
     response = await buildRequest(true);
   }
@@ -389,8 +439,6 @@ export async function resolveZedModels(credentials, options = {}) {
         method: "GET",
         headers: {
           Accept: "application/json",
-          [ZED_HEADERS.clientSupportsXai]: "true",
-          [ZED_HEADERS.version]: ZED_CLIENT_VERSION,
         },
       },
     });
@@ -488,4 +536,5 @@ export function clearZedCaches() {
   llmTokenCache.clear();
   modelCache.clear();
   modelInflight.clear();
+  negotiatedZedClientVersion = ZED_CLIENT_VERSION;
 }

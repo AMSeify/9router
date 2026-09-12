@@ -25,6 +25,7 @@ import { geminiToOpenAIResponse } from "../translator/response/gemini-to-openai.
 import { openaiResponsesToOpenAIResponse } from "../translator/response/openai-responses.js";
 import {
   ZED_CLIENT_VERSION,
+  ZED_COMPLETIONS_ACCEPT,
   ZED_PROVIDER,
   ZED_WEB_BASE_URL,
   resolveZedProvider,
@@ -34,6 +35,7 @@ import {
   ZED_HEADERS,
   ZED_LLM_BASE_URL,
   fetchZedAuthenticatedUser,
+  getZedClientVersion,
   resolveZedModels,
   summarizeZedPlan,
   zedLlmFetch,
@@ -54,7 +56,7 @@ function buildProviderRequest(provider, model, body, stream, credentials) {
   if (provider === ZED_PROVIDER.openai) {
     return openaiToOpenAIResponsesRequest(model, body, true, credentials);
   }
-  // xAI is OpenAI-shaped — forward as-is.
+  // xAI and Baseten are OpenAI chat-shaped — forward as-is.
   return { ...(body || {}), model, stream: stream !== false };
 }
 
@@ -203,14 +205,15 @@ class ZedExecutor extends BaseExecutor {
     super("zed");
   }
 
-  async resolveModel(model, credentials, signal, log) {
+  async resolveModel(model, credentials, signal, log, proxyOptions = null) {
     try {
-      const catalog = await resolveZedModels(credentials, { config: this.config, signal });
+      const catalog = await resolveZedModels(credentials, { config: this.config, signal, proxyOptions });
       let raw = catalog?.rawById?.get(model) ?? null;
       if (!raw) {
         const refreshed = await resolveZedModels(credentials, {
           config: this.config,
           signal,
+          proxyOptions,
           forceRefresh: true,
         });
         raw = refreshed?.rawById?.get(model) ?? null;
@@ -224,7 +227,7 @@ class ZedExecutor extends BaseExecutor {
   }
 
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
-    const { provider } = await this.resolveModel(model, credentials, signal, log);
+    const { provider } = await this.resolveModel(model, credentials, signal, log, proxyOptions);
     const providerRequest = buildProviderRequest(provider, model, body, stream, credentials);
     const bodyRecord = body || {};
     const payload = {
@@ -238,13 +241,14 @@ class ZedExecutor extends BaseExecutor {
     const response = await zedLlmFetch(credentials, "/completions", {
       config: this.config,
       signal,
+      proxyOptions,
       fetchOptions: {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Accept: "application/json, text/plain, */*",
+          Accept: ZED_COMPLETIONS_ACCEPT,
           "User-Agent": "9router/zed",
-          [ZED_HEADERS.version]: this.config?.appVersion?.toString() || ZED_CLIENT_VERSION,
+          [ZED_HEADERS.version]: this.config?.appVersion?.toString() || getZedClientVersion() || ZED_CLIENT_VERSION,
           [ZED_HEADERS.clientSupportsStatus]: "true",
           [ZED_HEADERS.clientSupportsStreamEnded]: "true",
           [ZED_HEADERS.clientSupportsXai]: "true",

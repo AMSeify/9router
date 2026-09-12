@@ -42,7 +42,7 @@ export function openaiToZedRequest(model, body, stream = true, credentials = nul
     // Zed Hosted OpenAI models speak Responses API (`input` + typed content)
     providerRequest = openaiToOpenAIResponsesRequest(model, body, wantStream, credentials);
   } else {
-    // XAi — OpenAI chat-compatible
+    // xAI / Baseten — OpenAI chat-compatible
     providerRequest = { ...body, model, stream: wantStream };
     delete providerRequest.thread_id;
     delete providerRequest.prompt_id;

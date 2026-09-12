@@ -292,10 +292,20 @@ const PROVIDER_MODELS_CONFIG = {
     customResolver: async (connection) => {
       let warning;
       try {
+        const proxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
         const result = await resolveZedModels({
           accessToken: connection.accessToken,
           providerSpecificData: connection.providerSpecificData || {},
-        }, { forceRefresh: true });
+        }, {
+          forceRefresh: true,
+          proxyOptions: {
+            connectionProxyEnabled: proxy.connectionProxyEnabled === true,
+            connectionProxyUrl: proxy.connectionProxyUrl || "",
+            connectionNoProxy: proxy.connectionNoProxy || "",
+            vercelRelayUrl: proxy.vercelRelayUrl || "",
+            strictProxy: proxy.strictProxy === true,
+          },
+        });
         if (result?.models?.length) {
           return {
             models: result.models.map((m) => ({

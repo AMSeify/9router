@@ -3,22 +3,31 @@
  * Used by ZedExecutor (open-sse/executors/zed.js) and zedAuth (open-sse/shared/zedAuth.js).
  *
  * Zed's /completions envelope expects snake_case provider tags on the HTTP API
- * (anthropic / open_ai / google / x_ai). PascalCase values are accepted by the
- * JSON parser but fail at runtime with opaque 500s.
+ * (anthropic / baseten / open_ai / google / x_ai). PascalCase values are
+ * accepted by the JSON parser but fail at runtime with opaque 500s.
+ * Source: crates/cloud_llm_client LanguageModelProvider serde rename_all=snake_case.
  */
 
 export const ZED_WEB_BASE_URL = "https://zed.dev";
 export const ZED_CLOUD_BASE_URL = "https://cloud.zed.dev";
 export const ZED_LLM_BASE_URL = "https://cloud.zed.dev";
 
-/** Default x-zed-version header value when registry omits appVersion. */
-export const ZED_CLIENT_VERSION = "1.6.3";
+/**
+ * Default x-zed-version. Zed 1.0 shipped April 2026; cloud.zed.dev may refuse
+ * catalogs/completions from stale clients via x-zed-minimum-required-version.
+ */
+export const ZED_CLIENT_VERSION = "1.19.2";
+
+/** Completions stream is NDJSON of CompletionEvent, not a single JSON body. */
+export const ZED_COMPLETIONS_ACCEPT =
+  "application/x-ndjson, text/event-stream, application/json, */*";
 
 /** Header names shared by cloud.zed.dev LLM + account APIs. */
 export const ZED_HEADER_NAMES = {
   version: "x-zed-version",
   expiredToken: "x-zed-expired-token",
   outdatedToken: "x-zed-outdated-token",
+  minimumRequiredVersion: "x-zed-minimum-required-version",
   clientSupportsStatus: "x-zed-client-supports-status-messages",
   clientSupportsStreamEnded:
     "x-zed-client-supports-stream-ended-request-completion-status",
@@ -54,6 +63,7 @@ export const ZED_ACCOUNT_PATH = "/account";
 /** Wire-protocol provider tags for CompletionBody.provider (HTTP API snake_case). */
 export const ZED_PROVIDER = {
   anthropic: "anthropic",
+  baseten: "baseten",
   openai: "open_ai",
   google: "google",
   xai: "x_ai",
@@ -65,6 +75,7 @@ export const ZED_DEFAULT_PROVIDER = ZED_PROVIDER.openai;
 function normalizeZedProviderTag(value) {
   const raw = String(value || "").toLowerCase().replace(/-/g, "_");
   if (raw === "anthropic") return ZED_PROVIDER.anthropic;
+  if (raw === "baseten") return ZED_PROVIDER.baseten;
   if (raw === "openai" || raw === "open_ai") return ZED_PROVIDER.openai;
   if (raw === "google" || raw === "gemini") return ZED_PROVIDER.google;
   if (raw === "xai" || raw === "x_ai" || raw === "x-ai") return ZED_PROVIDER.xai;
@@ -85,7 +96,27 @@ export function resolveZedProvider(catalogProvider, model) {
   if (/(claude|anthropic)/i.test(m)) return ZED_PROVIDER.anthropic;
   if (/(gemini|google)/i.test(m)) return ZED_PROVIDER.google;
   if (/(grok|x[_-]?ai)/i.test(m)) return ZED_PROVIDER.xai;
+  if (/(baseten)/i.test(m)) return ZED_PROVIDER.baseten;
   return ZED_DEFAULT_PROVIDER;
+}
+
+/** Compare dotted versions; true when `candidate` is strictly newer than `current`. */
+export function isNewerZedVersion(candidate, current) {
+  const parse = (value) =>
+    String(value || "")
+      .split(/[^\d]+/)
+      .filter(Boolean)
+      .map((part) => Number(part) || 0);
+  const a = parse(candidate);
+  const b = parse(current);
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const left = a[i] || 0;
+    const right = b[i] || 0;
+    if (left > right) return true;
+    if (left < right) return false;
+  }
+  return false;
 }
 
 /**
