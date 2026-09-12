@@ -136,6 +136,15 @@ export function buildZedEmptyCatalogMessage() {
   return "Zed returned an empty model catalog for this account.";
 }
 
+/** 401 from cloud.zed.dev user-auth (users/me, llm_tokens). No refresh_token exists. */
+export function buildZedUnauthorizedMessage() {
+  return (
+    "Unauthorized: cloud.zed.dev rejected this account's user token. " +
+    "Reconnect with Sign in with browser — Import from the local Zed keyring reuses the same rejected token. " +
+    "Zed does not issue a refresh token."
+  );
+}
+
 /**
  * Zed often returns a bare `{"message":"An internal server error occurred."}` for
  * billing/quota failures instead of a typed error code. Pair with plan info when known.

@@ -8,7 +8,7 @@ import { Modal, Button, Input } from "@/shared/components";
  * Zed Hosted AI Auth Modal
  * Auto-detect and/or manually import user_id + access_token from Zed Editor.
  */
-export default function ZedAuthModal({ isOpen, onSuccess, onClose }) {
+export default function ZedAuthModal({ isOpen, onSuccess, onClose, onBrowserSignIn }) {
   const [userId, setUserId] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [error, setError] = useState(null);
@@ -16,12 +16,14 @@ export default function ZedAuthModal({ isOpen, onSuccess, onClose }) {
   const [autoDetecting, setAutoDetecting] = useState(false);
   const [autoDetected, setAutoDetected] = useState(false);
   const [manualHint, setManualHint] = useState(false);
+  const [expiredKeyring, setExpiredKeyring] = useState(false);
 
   const runAutoDetect = async () => {
     setAutoDetecting(true);
     setError(null);
     setAutoDetected(false);
     setManualHint(false);
+    setExpiredKeyring(false);
 
     try {
       const res = await fetch("/api/oauth/zed/auto-import");
@@ -31,6 +33,9 @@ export default function ZedAuthModal({ isOpen, onSuccess, onClose }) {
         setUserId(data.userId || "");
         setAccessToken(data.accessToken || "");
         setAutoDetected(true);
+      } else if (data.expired) {
+        setExpiredKeyring(true);
+        setError(data.error || "Local Zed token was rejected by cloud.zed.dev");
       } else if (data.windowsManual) {
         setManualHint(true);
       } else {
@@ -107,6 +112,9 @@ export default function ZedAuthModal({ isOpen, onSuccess, onClose }) {
       onClose();
     } catch (err) {
       setError(err.message);
+      if (/unauthorized|rejected this account/i.test(String(err.message))) {
+        setExpiredKeyring(true);
+      }
     } finally {
       setImporting(false);
     }
@@ -201,8 +209,13 @@ export default function ZedAuthModal({ isOpen, onSuccess, onClose }) {
             </div>
 
             {error && (
-              <div className="bg-red-50 dark:bg-red-900/20 p-3 rounded-lg border border-red-200 dark:border-red-800">
+              <div className="bg-red-50 dark:bg-red-900/20 p-3 rounded-lg border border-red-200 dark:border-red-800 flex flex-col gap-2">
                 <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+                {expiredKeyring && onBrowserSignIn && (
+                  <Button onClick={onBrowserSignIn} fullWidth>
+                    Sign in with browser
+                  </Button>
+                )}
               </div>
             )}
 
@@ -210,7 +223,7 @@ export default function ZedAuthModal({ isOpen, onSuccess, onClose }) {
               <Button
                 onClick={handleImportToken}
                 fullWidth
-                disabled={importing || (!userId.trim() && !accessToken.trim())}
+                disabled={importing || expiredKeyring || (!userId.trim() && !accessToken.trim())}
               >
                 {importing ? "Importing..." : "Import Credentials"}
               </Button>
@@ -229,4 +242,5 @@ ZedAuthModal.propTypes = {
   isOpen: PropTypes.bool.isRequired,
   onSuccess: PropTypes.func,
   onClose: PropTypes.func.isRequired,
+  onBrowserSignIn: PropTypes.func,
 };

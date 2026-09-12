@@ -6,6 +6,7 @@ import {
   ZED_COMPLETIONS_ACCEPT,
   resolveZedProvider,
   isNewerZedVersion,
+  buildZedUnauthorizedMessage,
 } from "../../open-sse/config/zedConstants.js";
 import { openaiToZedRequest } from "../../open-sse/translator/request/openai-to-zed.js";
 import { mapZedModel, normalizeZedAccessToken, buildZedUserAuthHeader } from "../../open-sse/shared/zedAuth.js";
@@ -106,6 +107,13 @@ describe("normalizeZedAccessToken", () => {
       providerSpecificData: { userId: "123" },
     });
     expect(header).toBe('123 {"version":2,"id":"client_token_x","token":"abcd"}');
+  });
+});
+
+describe("buildZedUnauthorizedMessage", () => {
+  it("tells the user to browser-reconnect instead of re-importing a dead keyring token", () => {
+    expect(buildZedUnauthorizedMessage()).toMatch(/Sign in with browser/i);
+    expect(buildZedUnauthorizedMessage()).toMatch(/refresh token/i);
   });
 });
 

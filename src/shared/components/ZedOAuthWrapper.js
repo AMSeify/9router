@@ -42,6 +42,7 @@ export default function ZedOAuthWrapper({ isOpen, providerInfo, onSuccess, onClo
         isOpen={isOpen}
         onSuccess={handleSuccess}
         onClose={handleBack}
+        onBrowserSignIn={() => setMethod("browser")}
       />
     );
   }
@@ -50,7 +51,8 @@ export default function ZedOAuthWrapper({ isOpen, providerInfo, onSuccess, onClo
     <Modal isOpen={isOpen} title="Connect Zed Hosted AI" onClose={handleClose} size="lg">
       <div className="flex flex-col gap-3">
         <p className="text-sm text-text-muted">
-          Sign in via browser (RSA native-app flow), or import an existing Zed user id + access token.
+          Sign in with GitHub via zed.dev (RSA native-app flow) to mint a fresh user token.
+          Import from the local Zed keyring only works if that token is still accepted by cloud.zed.dev.
         </p>
         <button
           type="button"
@@ -61,7 +63,7 @@ export default function ZedOAuthWrapper({ isOpen, providerInfo, onSuccess, onClo
           <span>
             <span className="block text-sm font-medium">Sign in with browser</span>
             <span className="block text-xs text-text-muted mt-0.5">
-              Opens zed.dev native-app sign-in and captures the encrypted callback locally.
+              Opens zed.dev native-app sign-in and captures a fresh encrypted callback locally.
             </span>
           </span>
         </button>
@@ -74,7 +76,8 @@ export default function ZedOAuthWrapper({ isOpen, providerInfo, onSuccess, onClo
           <span>
             <span className="block text-sm font-medium">Import credentials</span>
             <span className="block text-xs text-text-muted mt-0.5">
-              Paste user_id + access_token from Zed (or auto-detect from the local keyring).
+              Only if Zed editor is currently signed in with a token cloud.zed.dev still accepts.
+              A rejected local keyring cannot be imported.
             </span>
           </span>
         </button>

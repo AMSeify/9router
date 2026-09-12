@@ -4,6 +4,8 @@ import { homedir } from "os";
 import { join } from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { fetchZedAuthenticatedUser } from "open-sse/shared/zedAuth.js";
+import { buildZedUnauthorizedMessage } from "open-sse/config/zedConstants.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -201,6 +203,32 @@ async function tryMacKeychain() {
   }
 }
 
+/** Reject keyring blobs that cloud.zed.dev already 401s so the UI does not auto-fill them. */
+async function foundOrExpired(parsed, source) {
+  try {
+    await fetchZedAuthenticatedUser({
+      accessToken: parsed.accessToken,
+      providerSpecificData: { userId: parsed.userId },
+    });
+  } catch (err) {
+    const status = Number(err?.status);
+    if (status === 401 || status === 403 || /unauthorized/i.test(String(err?.message || ""))) {
+      return NextResponse.json({
+        found: false,
+        expired: true,
+        error: buildZedUnauthorizedMessage(),
+        source,
+      });
+    }
+  }
+  return NextResponse.json({
+    found: true,
+    userId: parsed.userId,
+    accessToken: parsed.accessToken,
+    source,
+  });
+}
+
 /**
  * GET /api/oauth/zed/auto-import
  * Best-effort auto-detect Zed credentials from local files / keyring.
@@ -216,12 +244,7 @@ export async function GET() {
         const raw = await readFile(candidate, "utf8");
         const parsed = parseCredentialsPayload(raw);
         if (parsed?.userId && parsed?.accessToken) {
-          return NextResponse.json({
-            found: true,
-            userId: parsed.userId,
-            accessToken: parsed.accessToken,
-            source: candidate,
-          });
+          return foundOrExpired(parsed, candidate);
         }
       } catch {
         /* try next */
@@ -231,24 +254,14 @@ export async function GET() {
     if (platform === "linux") {
       const fromSecret = await trySecretTool();
       if (fromSecret?.userId && fromSecret?.accessToken) {
-        return NextResponse.json({
-          found: true,
-          userId: fromSecret.userId,
-          accessToken: fromSecret.accessToken,
-          source: "secret-tool:url=https://zed.dev",
-        });
+        return foundOrExpired(fromSecret, "secret-tool:url=https://zed.dev");
       }
     }
 
     if (platform === "darwin") {
       const fromKeychain = await tryMacKeychain();
       if (fromKeychain?.userId && fromKeychain?.accessToken) {
-        return NextResponse.json({
-          found: true,
-          userId: fromKeychain.userId,
-          accessToken: fromKeychain.accessToken,
-          source: "keychain",
-        });
+        return foundOrExpired(fromKeychain, "keychain");
       }
     }
 

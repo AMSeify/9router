@@ -20,6 +20,7 @@ import {
   ZED_HOSTED_CONFIG,
 } from "@/lib/oauth/constants/oauth";
 import { buildClineHeaders } from "@/shared/utils/clineAuth";
+import { buildZedUserAuthHeader } from "open-sse/shared/zedAuth.js";
 
 // OAuth provider test endpoints
 const OAUTH_TEST_CONFIG = {
@@ -135,11 +136,17 @@ const OAUTH_TEST_CONFIG = {
     method: "GET",
     authHeader: "Authorization",
     authPrefix: "",
-    // buildAuth overrides the default `${prefix}${accessToken}` composition
     buildAuth: (accessToken, connection) => {
       const userId = connection?.providerSpecificData?.userId;
       if (!userId || !accessToken) return null;
-      return `${userId} ${accessToken}`;
+      try {
+        return buildZedUserAuthHeader({
+          accessToken,
+          providerSpecificData: connection?.providerSpecificData || {},
+        });
+      } catch {
+        return null;
+      }
     },
     extraHeaders: { Accept: "application/json" },
     refreshable: false,

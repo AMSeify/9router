@@ -327,7 +327,9 @@ const PROVIDER_MODELS_CONFIG = {
         }
         warning = result?.warning || "Zed returned no models.";
       } catch (error) {
-        warning = `Failed to fetch Zed models: ${error.message}`;
+        warning = Number(error?.status) === 401
+          ? error.message
+          : `Failed to fetch Zed models: ${error.message}`;
         console.log("Failed to fetch Zed models:", error.message);
       }
       return { models: [], warning };

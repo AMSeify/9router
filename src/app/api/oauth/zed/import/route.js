@@ -51,8 +51,11 @@ export async function POST(request) {
       },
     });
   } catch (error) {
-    console.log("Zed import token error:", error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    const status = Number(error?.status) === 401 || Number(error?.status) === 403
+      ? Number(error.status)
+      : 500;
+    console.log("Zed import token error:", error.message);
+    return NextResponse.json({ error: error.message }, { status });
   }
 }
 

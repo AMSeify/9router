@@ -38,7 +38,11 @@ const zed = {
     let userInfo = null;
     try {
       userInfo = await fetchZedAuthenticatedUser(credentials, { config: ZED_HOSTED_CONFIG });
-    } catch { /* best-effort */ }
+    } catch (err) {
+      // 401/403 means the decrypted token is already unusable — fail the connect
+      // instead of saving a green "active" row that cannot list models.
+      if (Number(err?.status) === 401 || Number(err?.status) === 403) throw err;
+    }
     const organizationId = resolveZedOrganizationId(credentials, userInfo);
     return {
       userInfo,

@@ -24,6 +24,7 @@ import {
   isNewerZedVersion,
   buildZedHostedModelsBlockedMessage,
   buildZedEmptyCatalogMessage,
+  buildZedUnauthorizedMessage,
 } from "../config/zedConstants.js";
 
 export {
@@ -242,9 +243,10 @@ async function fetchJson(url, options, proxyOptions = null) {
     }
   }
   if (!res.ok) {
-    const message =
+    const raw =
       data?.message || data?.error?.message || data?.error || text || `HTTP ${res.status}`;
-    const err = new Error(String(message));
+    const message = res.status === 401 ? buildZedUnauthorizedMessage() : String(raw);
+    const err = new Error(message);
     err.status = res.status;
     err.body = data;
     throw err;
