@@ -8,8 +8,10 @@ import { describe, it, expect } from "vitest";
 import "./registerAll.js";
 import { translateResponse } from "../../open-sse/translator/index.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
+import { CLAUDE_TOOL_SUFFIX } from "../../open-sse/config/appConstants.js";
 
 const CLOAKED = "RunCode";
+const LEGACY_CLOAKED = "run_code" + CLAUDE_TOOL_SUFFIX;
 
 const toolUseStart = (name) => ({
   type: "content_block_start",
@@ -35,10 +37,16 @@ describe("Claude → Claude streaming passthrough (OAuth tool cloak)", () => {
     expect(outText).toBe(textChunk);
   });
 
-  it("is a no-op when no cloak map is present", () => {
+  it("is a no-op for TitleCase names when no cloak map is present", () => {
     const chunk = toolUseStart(CLOAKED);
     const [out] = translateResponse(FORMATS.CLAUDE, FORMATS.CLAUDE, chunk, {});
     expect(out).toBe(chunk);
+  });
+
+  it("falls back to stripping legacy *_ide suffix when no cloak map is present", () => {
+    const chunk = toolUseStart(LEGACY_CLOAKED);
+    const [out] = translateResponse(FORMATS.CLAUDE, FORMATS.CLAUDE, chunk, {});
+    expect(out.content_block.name).toBe("run_code");
   });
 
   it("tolerates the null flush chunk", () => {
