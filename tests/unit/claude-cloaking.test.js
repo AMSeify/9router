@@ -17,7 +17,7 @@ import {
   prependToFirstUserMessage,
 } from "../../open-sse/utils/claudeCloaking.js";
 import { CLAUDE_CLI_VERSION } from "../../open-sse/providers/shared.js";
-import { CLAUDE_SYSTEM_PROMPT } from "../../open-sse/config/appConstants.js";
+import { CLAUDE_SYSTEM_PROMPT, CLAUDE_TOOL_SUFFIX } from "../../open-sse/config/appConstants.js";
 
 it("advertises the current Claude Code fingerprint version", () => {
   const body = applyCloaking({ messages: [] }, "sk-ant-oat-test", "session-id");
@@ -184,6 +184,12 @@ describe("decloakStreamChunk", () => {
     expect(decloakStreamChunk(null, toolNameMap)).toBeNull();
     expect(decloakStreamChunk(toolUseStart("RunCode"), null).content_block.name).toBe("RunCode");
     expect(decloakStreamChunk(toolUseStart("RunCode"), new Map()).content_block.name).toBe("RunCode");
+  });
+
+  it("falls back to stripping legacy *_ide suffix when the map is missing", () => {
+    expect(decloakStreamChunk(toolUseStart("run_code" + CLAUDE_TOOL_SUFFIX), null).content_block.name).toBe("run_code");
+    expect(decloakStreamChunk(toolUseStart("run_code" + CLAUDE_TOOL_SUFFIX), new Map()).content_block.name).toBe("run_code");
+    expect(decloakStreamChunk(toolUseStart("uncloaked_tool"), null).content_block.name).toBe("uncloaked_tool");
   });
 });
 
