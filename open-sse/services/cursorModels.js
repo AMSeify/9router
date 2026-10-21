@@ -222,7 +222,11 @@ export function parseCursorAvailableModels(payload) {
  */
 export function resolveAutoModelSelection(models) {
   if (!Array.isArray(models) || models.length === 0) return null;
-  const usable = models.filter((model) => model.supportsAgent && !model.isChatOnly && !model.isHidden);
+  // When AvailableModels flags are missing, treat every usable id as agent-capable.
+  const usable = models.filter((model) => {
+    if (model.supportsAgent === false || model.isChatOnly || model.isHidden) return false;
+    return true;
+  });
   if (usable.length === 0) return null;
   const preferred = usable.find((model) => model.defaultOn) || usable[0];
   return {
