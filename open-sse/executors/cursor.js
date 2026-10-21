@@ -911,6 +911,10 @@ export class CursorExecutor extends BaseExecutor {
               }
               // thinking_delta (field 4). Composer puts the visible answer after
               // </think> and reasoning before it; Grok often only sends this field.
+              // Stream reasoning live for all models so clients (e.g. Hermes) do
+              // not sit in silence until turn_ended and then treat the close as
+              // truncation. Content still comes from text_delta or the finish
+              // fallback when the turn never produced visible text.
               if (update.has(4)) {
                 const thinkingDelta = extractAgentString(decodeMessage(update.get(4)[0].value), 1);
                 if (thinkingDelta) {
@@ -929,6 +933,8 @@ export class CursorExecutor extends BaseExecutor {
                       emittedText = true;
                       onEvent({ type: "text", value: deltaContent });
                     }
+                  } else {
+                    onEvent({ type: "thinking", value: thinkingDelta });
                   }
                 }
               }
@@ -1124,12 +1130,32 @@ export class CursorExecutor extends BaseExecutor {
         // Defer terminal SSE until runWithRetry settles. Emitting stop on the
         // first empty upstream turn wedges Cursor before the tail-only retry
         // can recover the session.
+        let streamedOutput = false;
+        let closed = false;
+        const closeCleanly = (finishReason = "stop") => {
+          if (closed) return;
+          closed = true;
+          try {
+            controller.enqueue(encoder.encode(chatChunkSse({
+              id: responseId, created, model, delta: {},
+              finishReason,
+            })));
+            controller.enqueue(encoder.encode(SSE_DONE));
+            controller.close();
+          } catch {
+            // Controller already closed by cancel/error.
+          }
+        };
         runWithRetry((event) => {
+          if (closed) return;
           if (event.type === "text") {
+            streamedOutput = true;
             controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: { content: event.value } })));
           } else if (event.type === "thinking") {
+            streamedOutput = true;
             controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: { reasoning_content: event.value } })));
           } else if (event.type === "tool_call") {
+            streamedOutput = true;
             controller.enqueue(encoder.encode(chatChunkSse({
               id: responseId, created, model,
               delta: {
@@ -1145,18 +1171,20 @@ export class CursorExecutor extends BaseExecutor {
             // An SSE error frame, not a content delta: a protocol failure must not
             // be rendered to the user as the assistant's reply, and downstream
             // usage tracking must not record the turn as a success.
+            closed = true;
             controller.enqueue(encoder.encode(sseChunk({ error: { message: event.value, type: "api_error" } })));
             controller.enqueue(encoder.encode(SSE_DONE));
             controller.close();
           } else if (event.type === "done") {
-            controller.enqueue(encoder.encode(chatChunkSse({
-              id: responseId, created, model, delta: {},
-              finishReason: event.finishReason || "stop",
-            })));
-            controller.enqueue(encoder.encode(SSE_DONE));
-            controller.close();
+            closeCleanly(event.finishReason || "stop");
           }
-        }).catch((error) => controller.error(error));
+        }).catch((error) => {
+          // After partial output, prefer a normal OpenAI finish + [DONE] so
+          // clients like Hermes do not report "stream truncated". Zero-output
+          // failures still surface as a hard stream error.
+          if (streamedOutput) closeCleanly("stop");
+          else controller.error(error);
+        });
       },
       cancel() {
         requestController.abort();
