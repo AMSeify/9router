@@ -235,7 +235,65 @@ describe("CursorExecutor AgentService exec_request handling", () => {
 
     const events = parseSSE(await result.response.text());
     const content = events.map((e) => e.choices?.[0]?.delta?.content || "").join("");
+    const reasoning = events.map((e) => e.choices?.[0]?.delta?.reasoning_content || "").join("");
+    // Live reasoning so clients are not silent until turn_ended; content still
+    // comes from the finish fallback when there was no text_delta.
+    expect(reasoning).toBe("hello from grok");
     expect(content).toBe("hello from grok");
+    const finish = events.find((e) => e.choices?.[0]?.finish_reason);
+    expect(finish?.choices?.[0]?.finish_reason).toBe("stop");
+  });
+
+  it("streams Grok thinking_delta live as reasoning_content before turn_ended", async () => {
+    const { result } = await runAgent({
+      model: "grok-4.7-medium",
+      frames: [
+        thinkingFrame("part-a "),
+        thinkingFrame("part-b"),
+        turnEndedFrame(),
+      ],
+      stream: true,
+    });
+
+    const raw = await result.response.text();
+    expect(raw.trimEnd().endsWith("data: [DONE]")).toBe(true);
+    const events = parseSSE(raw);
+    const reasoningChunks = events
+      .map((e) => e.choices?.[0]?.delta?.reasoning_content)
+      .filter(Boolean);
+    expect(reasoningChunks).toEqual(["part-a ", "part-b"]);
+    const content = events.map((e) => e.choices?.[0]?.delta?.content || "").join("");
+    expect(content).toBe("part-a part-b");
+  });
+
+  it("closes SSE with finish_reason and [DONE] after partial output on transport failure", async () => {
+    const executor = new CursorExecutor();
+    let reads = 0;
+    executor.openAgentHttp2Stream = () => ({
+      responseHeaders: Promise.resolve({ ":status": 200 }),
+      write() {},
+      end() {},
+      close() {},
+      async read() {
+        reads++;
+        if (reads === 1) return { value: textFrame("partial"), done: false };
+        throw new Error("h2 reset");
+      },
+    });
+
+    const result = await executor.executeAgent({
+      model: "grok-4.7-medium",
+      body: { messages: [{ role: "user", content: "hi" }] },
+      stream: true,
+      credentials,
+    });
+
+    const raw = await result.response.text();
+    expect(raw).toContain("partial");
+    expect(raw.trimEnd().endsWith("data: [DONE]")).toBe(true);
+    const events = parseSSE(raw);
+    const finish = events.find((e) => e.choices?.[0]?.finish_reason);
+    expect(finish?.choices?.[0]?.finish_reason).toBe("stop");
   });
 
   it("returns stored KV blob bytes on get after set", async () => {
