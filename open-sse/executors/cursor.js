@@ -793,7 +793,7 @@ export class CursorExecutor extends BaseExecutor {
     // (including effort tiers) instead of blindly stripping suffixes.
     // Always pass a Set (possibly empty) so a failed GetUsableModels does not
     // fall back to inventing stripped bases that AgentService empty-turns.
-    const catalog = await resolveCursorModels(credentials, { signal, log });
+    const catalog = await resolveCursorModels(credentials, { signal, log, proxyOptions });
     const catalogIds = new Set((catalog?.models || []).map((entry) => entry.id));
     let runModel = model;
     if (model === "default" || model === "auto") {
