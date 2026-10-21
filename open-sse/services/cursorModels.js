@@ -7,10 +7,11 @@
  */
 
 import crypto from "crypto";
-import http2 from "http2";
 import { PROVIDER_OAUTH } from "../providers/index.js";
 import { buildCursorHeaders } from "../utils/cursorChecksum.js";
 import { decodeMessage } from "../utils/cursorProtobuf.js";
+import { connectHttp2 } from "../utils/http2Connect.js";
+import { resolveOutboundProxyUrl } from "../utils/proxyFetch.js";
 
 const FETCH_TIMEOUT_MS = 10_000;
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -22,6 +23,16 @@ const DISPLAY_NAME_FIELD = 4;
 const DISPLAY_NAME_SHORT_FIELD = 5;
 const RESPONSE_MODELS_FIELD = 1;
 
+// agent.v1.AvailableModels (response field 2) carries the model-picker flags
+// AgentService honours: agent support, chat-only, hidden, and the account's
+// default-on pick used to resolve the "Auto (Server Picks)" entry.
+const RESPONSE_AVAILABLE_MODELS_FIELD = 2;
+const AVAILABLE_MODEL_NAME_FIELD = 1;
+const AVAILABLE_MODEL_DEFAULT_ON_FIELD = 2;
+const AVAILABLE_MODEL_IS_CHAT_ONLY_FIELD = 4;
+const AVAILABLE_MODEL_SUPPORTS_AGENT_FIELD = 5;
+const AVAILABLE_MODEL_IS_HIDDEN_FIELD = 35;
+
 /** @type {Map<string, { expiresAt: number, models: { id: string, name: string }[] }>} */
 const catalogCache = new Map();
 
@@ -31,19 +42,81 @@ function getCursorModelsUrl() {
   return `${config.agentEndpoint.replace(/\/$/, "")}${config.modelsEndpoint}`;
 }
 
-function cacheKey(credentials) {
+function cacheKey(credentials, proxyUrl) {
   const seed = [
     credentials?.providerSpecificData?.machineId,
     credentials?.accessToken,
+    proxyUrl || "direct",
   ].filter(Boolean).join(":");
   if (!seed) return "cursor-anonymous";
   return crypto.createHash("sha256").update(`cursor:${seed}`).digest("hex");
+}
+
+function maskProxyUrl(proxyUrl) {
+  try {
+    const parsed = new URL(proxyUrl);
+    return `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ""}`;
+  } catch {
+    return "proxy";
+  }
+}
+
+/**
+ * Proxy options for GetUsableModels. Chat already tunnels AgentService through
+ * the connection pool; the catalog call must use the same URL or Cursor
+ * rejects the direct socket (403) and the dashboard falls back to the static list.
+ * `resolved` is the object from resolveConnectionProxyConfig / chatCore.
+ */
+export function cursorCatalogProxyOptions(resolved = {}) {
+  return {
+    connectionProxyEnabled: resolved.connectionProxyEnabled === true || resolved.enabled === true,
+    connectionProxyUrl: resolved.connectionProxyUrl || resolved.url || "",
+    connectionNoProxy: resolved.connectionNoProxy || resolved.noProxy || "",
+    vercelRelayUrl: resolved.vercelRelayUrl || "",
+    proxyPoolId: resolved.proxyPoolId || resolved.connectionProxyPoolId || null,
+    strictProxy: resolved.strictProxy === true,
+  };
+}
+
+function proxyOptionsFor(credentials, explicit) {
+  if (explicit) return explicit;
+  const psd = credentials?.providerSpecificData || {};
+  return cursorCatalogProxyOptions({
+    connectionProxyEnabled: psd.connectionProxyEnabled === true,
+    connectionProxyUrl: psd.connectionProxyUrl || "",
+    connectionNoProxy: psd.connectionNoProxy || "",
+    vercelRelayUrl: psd.vercelRelayUrl || "",
+    proxyPoolId: psd.connectionProxyPoolId || null,
+    strictProxy: psd.strictProxy === true,
+  });
+}
+
+// Strict pools must not fall back to a direct socket (#4333). Env HTTP_PROXY
+// does not honor a bound connection pool that failed to resolve.
+function strictProxyUnresolved(targetUrl, proxyOptions) {
+  if (proxyOptions?.strictProxy !== true) return false;
+  if (proxyOptions?.vercelRelayUrl) return false;
+  const connectionEnabled = proxyOptions?.enabled === true
+    || proxyOptions?.connectionProxyEnabled === true;
+  const hasPoolId = Boolean(proxyOptions?.proxyPoolId);
+  const explicitUrl = String(proxyOptions?.url || proxyOptions?.connectionProxyUrl || "").trim();
+  const intended = hasPoolId || connectionEnabled || explicitUrl.length > 0;
+  if (!intended) return false;
+  if (hasPoolId || connectionEnabled) {
+    return !explicitUrl || !resolveOutboundProxyUrl(targetUrl, proxyOptions);
+  }
+  return !resolveOutboundProxyUrl(targetUrl, proxyOptions);
 }
 
 function firstString(fields, fieldNumber) {
   const value = fields.get(fieldNumber)?.[0]?.value;
   if (!value || typeof value === "number") return "";
   return Buffer.from(value).toString("utf8");
+}
+
+function firstBool(fields, fieldNumber) {
+  const value = fields.get(fieldNumber)?.[0]?.value;
+  return value === 1;
 }
 
 /**
@@ -77,20 +150,22 @@ export function parseCursorUsableModels(payload) {
 /**
  * agent.api5.cursor.sh is HTTP/2-only; Node fetch/undici cannot speak h2.
  * Unary GetUsableModels uses an unframed protobuf body (application/proto).
+ * Tunnel through the same CONNECT/SOCKS proxy as AgentService chat — a direct
+ * socket is geo-blocked (403) even when the token is valid.
  */
-function http2PostProto(url, headers, body, signal, timeoutMs) {
+function http2PostProto(url, headers, body, signal, timeoutMs, proxyUrl) {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
-    const client = http2.connect(`https://${urlObj.host}`);
     const chunks = [];
     let responseHeaders = {};
     let settled = false;
+    let client = null;
 
     const finish = (fn) => (...args) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutId);
-      try { client.close(); } catch {}
+      try { client?.close(); } catch {}
       fn(...args);
     };
 
@@ -98,41 +173,57 @@ function http2PostProto(url, headers, body, signal, timeoutMs) {
       reject(new Error("Cursor GetUsableModels timed out"));
     }), timeoutMs);
 
-    client.on("error", finish(reject));
+    connectHttp2(url, { proxyUrl, timeoutMs }).then((connected) => {
+      if (settled) {
+        try { connected.close(); } catch {}
+        return;
+      }
+      client = connected;
+      client.on("error", finish(reject));
 
-    const req = client.request({
-      ":method": "POST",
-      ":path": urlObj.pathname,
-      ":authority": urlObj.host,
-      ":scheme": "https",
-      ...headers,
-    });
-
-    req.on("response", (hdrs) => { responseHeaders = hdrs; });
-    req.on("data", (chunk) => { chunks.push(chunk); });
-    req.on("end", finish(() => {
-      resolve({
-        status: Number(responseHeaders[":status"] || 0),
-        body: Buffer.concat(chunks),
+      const req = client.request({
+        ":method": "POST",
+        ":path": urlObj.pathname,
+        ":authority": urlObj.host,
+        ":scheme": "https",
+        ...headers,
       });
-    }));
-    req.on("error", finish(reject));
 
-    if (signal) {
-      const onAbort = finish(() => reject(new Error("Request aborted")));
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
-    }
+      req.on("response", (hdrs) => { responseHeaders = hdrs; });
+      req.on("data", (chunk) => { chunks.push(chunk); });
+      req.on("end", finish(() => {
+        resolve({
+          status: Number(responseHeaders[":status"] || 0),
+          body: Buffer.concat(chunks),
+        });
+      }));
+      req.on("error", finish(reject));
 
-    req.end(body && body.length ? Buffer.from(body) : undefined);
+      if (signal) {
+        const onAbort = finish(() => reject(new Error("Request aborted")));
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
+
+      req.end(body && body.length ? Buffer.from(body) : undefined);
+    }).catch(finish(reject));
   });
 }
 
-async function fetchCursorCatalog(credentials, signal) {
+async function fetchCursorCatalog(credentials, options = {}) {
   const accessToken = credentials?.accessToken;
   const machineId = credentials?.providerSpecificData?.machineId;
   const url = getCursorModelsUrl();
   if (!accessToken || !machineId || !url) return null;
+
+  const proxyOptions = proxyOptionsFor(credentials, options.proxyOptions);
+  if (strictProxyUnresolved(url, proxyOptions)) {
+    throw new Error("Cursor GetUsableModels requires a strict proxy; refusing a direct connection");
+  }
+  const proxyUrl = resolveOutboundProxyUrl(url, proxyOptions) || undefined;
+  if (proxyUrl) {
+    options.log?.info?.("CURSOR_MODELS", `GetUsableModels via proxy ${maskProxyUrl(proxyUrl)}`);
+  }
 
   const headers = {
     ...buildCursorHeaders(accessToken, machineId, credentials?.providerSpecificData?.ghostMode !== false),
@@ -144,14 +235,80 @@ async function fetchCursorCatalog(credentials, signal) {
   delete headers["connect-accept-encoding"];
   delete headers["connect-protocol-version"];
 
-  const response = await http2PostProto(url, headers, new Uint8Array(), signal, FETCH_TIMEOUT_MS);
+  const response = await http2PostProto(url, headers, new Uint8Array(), options.signal, FETCH_TIMEOUT_MS, proxyUrl);
   if (response.status !== 200) {
     const error = new Error(`Cursor GetUsableModels returned ${response.status}`);
     error.status = response.status;
     throw error;
   }
 
-  return parseCursorUsableModels(new Uint8Array(response.body));
+  return mergeCursorModelFlags(parseCursorUsableModels(new Uint8Array(response.body)), response.body);
+}
+
+/**
+ * Attach model-picker flags (supportsAgent/defaultOn/…) from the response's
+ * AvailableModels onto the usable-models list so callers can resolve the
+ * auto/default entry. Only mutates when the server sent field 2, keeping the
+ * parsed shape backward compatible.
+ */
+export function mergeCursorModelFlags(models, payload) {
+  const available = parseCursorAvailableModels(payload);
+  if (!available.length || !Array.isArray(models)) return models;
+  const flagsById = new Map(available.map((model) => [model.id, model]));
+  return models.map((model) => {
+    const flags = flagsById.get(model.id);
+    return flags ? { ...model, ...flags } : model;
+  });
+}
+
+/**
+ * Decode the current Cursor model-picker catalog (response field 2,
+ * agent.v1.AvailableModels): the canonical AgentService model name plus the
+ * picker flags needed to resolve "Auto (Server Picks)" to a real model.
+ */
+export function parseCursorAvailableModels(payload) {
+  const response = decodeMessage(payload);
+  const seen = new Set();
+  const models = [];
+
+  for (const entry of response.get(RESPONSE_AVAILABLE_MODELS_FIELD) || []) {
+    if (!entry?.value || typeof entry.value === "number") continue;
+    const fields = decodeMessage(entry.value);
+    const id = firstString(fields, AVAILABLE_MODEL_NAME_FIELD).trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+
+    models.push({
+      id,
+      defaultOn: firstBool(fields, AVAILABLE_MODEL_DEFAULT_ON_FIELD),
+      isChatOnly: firstBool(fields, AVAILABLE_MODEL_IS_CHAT_ONLY_FIELD),
+      supportsAgent: firstBool(fields, AVAILABLE_MODEL_SUPPORTS_AGENT_FIELD),
+      isHidden: firstBool(fields, AVAILABLE_MODEL_IS_HIDDEN_FIELD),
+    });
+  }
+
+  return models;
+}
+
+/**
+ * "Auto (Server Picks)" / "default" is not a real AgentService model id —
+ * sending it verbatim makes Run come back empty. Resolve it to the account's
+ * default agent-capable model so the server picks like the IDE does. Prefers
+ * the picker's defaultOn model, then the first usable agent model.
+ */
+export function resolveAutoModelSelection(models) {
+  if (!Array.isArray(models) || models.length === 0) return null;
+  // When AvailableModels flags are missing, treat every usable id as agent-capable.
+  const usable = models.filter((model) => {
+    if (model.supportsAgent === false || model.isChatOnly || model.isHidden) return false;
+    return true;
+  });
+  if (usable.length === 0) return null;
+  const preferred = usable.find((model) => model.defaultOn) || usable[0];
+  return {
+    modelId: preferred.id,
+    matchedBy: "auto-default",
+  };
 }
 
 /**
@@ -164,7 +321,11 @@ export async function resolveCursorModels(credentials, options = {}) {
     return null;
   }
 
-  const key = cacheKey(credentials);
+  const proxyUrl = resolveOutboundProxyUrl(
+    getCursorModelsUrl() || "https://agent.api5.cursor.sh/",
+    proxyOptionsFor(credentials, options.proxyOptions),
+  );
+  const key = cacheKey(credentials, proxyUrl);
   const now = Date.now();
   if (!options.forceRefresh) {
     const cached = catalogCache.get(key);
@@ -172,7 +333,7 @@ export async function resolveCursorModels(credentials, options = {}) {
   }
 
   try {
-    const models = await fetchCursorCatalog(credentials, options.signal);
+    const models = await fetchCursorCatalog(credentials, options);
     if (!models?.length) return null;
     catalogCache.set(key, { expiresAt: now + CACHE_TTL_MS, models });
     return { models };
