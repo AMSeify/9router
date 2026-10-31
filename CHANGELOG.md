@@ -3,6 +3,7 @@
 ## Features
 - **Cursor**: browser login (same deep-control flow as the Cursor CLI) so each connection gets its own machine ID. A second account no longer shares the IDE machine ID, which Cursor answers with an empty AgentService turn
 - **Cursor**: refresh the static fallback catalog to the current GetUsableModels list (Composer 2.5, Claude 5.x / Fable, GPT-5.6, Grok 4.7, Gemini 4 Argon, and effort tiers)
+- **Usage**: Cursor Quota Tracker shows Cursor/Other Models % plus per-model API tokens and billed cost from GetAggregatedUsageEvents (no Plan USD progress bar)
 
 ## Fixes
 - **Cursor**: send GetUsableModels through the proxy already configured on that connection (same path as chat). Accounts with no proxy still connect directly; a direct socket is what Cursor geo-blocks with 403
